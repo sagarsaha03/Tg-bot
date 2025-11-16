@@ -5,6 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, MessageNotModified
 from scraper.skymovies import SkyMoviesScraper
 import re
+import math
 
 # --- Bot Configuration ---
 
@@ -51,6 +52,7 @@ def create_scraped_links_message(movie_title, download_links, button_text=""):
     if button_text:
         message_text += f"🌐 {button_text} 📥\n\n"
     
+    # Define display order
     display_order = [
         ('gofile', '🔰 GoFile Links'),
         ('streamtape', '🐬 StreamTape Links'), 
@@ -62,28 +64,35 @@ def create_scraped_links_message(movie_title, download_links, button_text=""):
         ('vikingfile', '⚡ VikingFile Links'),
         ('uptomega', '☁️ Uptomega Links'),
         ('indishare', '📎 IndiShare Links'),
-        ('other', '🔗 Other Drive Links')
     ]
     
     links_found = False
     total_links = 0
     
-    # Prioritize 'other' to show all uncategorized first
-    all_categories = ['other'] + [key for key in display_order if key[0] != 'other']
-    all_categories_keys = [key[0] for key in display_order]
+    # Get all categories that have links, in the correct order
+    categories_with_links = []
     
-    # Add any remaining categories from download_links
-    for key in download_links:
-        if key not in all_categories_keys:
-            all_categories.append((key, f"🔗 {key.title()} Links"))
+    # Add ordered categories first
+    for key, name in display_order:
+        if download_links.get(key):
+            categories_with_links.append((key, name))
+            
+    # Add 'other' category last
+    if download_links.get('other'):
+        categories_with_links.append(('other', '🔗 Other Drive Links'))
+        
+    # Add any other categories that weren't in the list
+    ordered_keys = [k[0] for k in categories_with_links]
+    for key, links in download_links.items():
+        if key not in ordered_keys and links:
+            categories_with_links.append((key, f"🔗 {key.title()} Links"))
 
-    for item in display_order:
-        category_key, display_name = item
+    for category_key, display_name in categories_with_links:
         links = download_links.get(category_key, [])
         if links:
-            message_text += f"{display_name}\n"
+            message_text += f"**{display_name}**\n"
             shown_links = set()
-            for link in links[:5]:  # Show max 5 per category
+            for link in links: # Show all links
                 display_link = shorten_url_display(link)
                 if display_link not in shown_links:
                     shown_links.add(display_link)
@@ -102,69 +111,87 @@ def create_scraped_links_message(movie_title, download_links, button_text=""):
     return message_text, total_links
 
 def build_main_links_message(user_data):
-    """--- MODIFIED ---
+    """--- NEW PAGINATION LOGIC ---
     Builds the main links message (caption) and dynamic buttons.
-    Only GoFile/StreamTape are shown first. ALL other links are paginated.
+    Paginates the *categories* of links, 4 at a time.
     """
     
     movie_title = user_data.get('current_movie_title', 'Unknown Movie')
     download_links = user_data.get('main_links', {})
     button_links = user_data.get('button_links', {})
     
+    # Store button links in user_data for callback handler
     user_data['button_links_list'] = list(button_links.items())
 
-    other_links_page = user_data.get('other_links_page', 1)
-    other_links_per_page = 4
+    # --- 1. Category Pagination Logic ---
     
-    # --- 1. Build Message Caption ---
-    caption_text = f"📌 **{movie_title}**\n\n"
-    
-    # Define *only* the truly premium, top-level links
-    top_premium_order = [
+    # Define full display order
+    display_order = [
         ('gofile', '🔰 GoFile Links'),
         ('streamtape', '🐬 StreamTape Links'), 
+        ('hubdrive', '🛡️ HubDrive Links'),
+        ('hubcloud', '☁️ HubCloud Links'),
+        ('gdflix', '📦 GDFlix Links'),
+        ('gdtot', '📂 GDTot Links'),
+        ('filepress', '🗂️ FilePress Links'),
+        ('vikingfile', '⚡ VikingFile Links'),
+        ('uptomega', '☁️ Uptomega Links'),
+        ('indishare', '📎 IndiShare Links'),
     ]
     
-    premium_links_found = False
-    for category_key, display_name in top_premium_order:
+    # Get all categories *that have links*
+    available_categories = []
+    
+    # Add ordered categories first
+    for key, name in display_order:
+        if download_links.get(key):
+            available_categories.append((key, name))
+            
+    # Add 'other' category
+    if download_links.get('other'):
+        available_categories.append(('other', '🔗 Other Drive Links'))
+        
+    # Add any other stragglers
+    ordered_keys = [k[0] for k in available_categories]
+    for key, links in download_links.items():
+        if key not in ordered_keys and links:
+            available_categories.append((key, f"🔗 {key.title()} Links"))
+
+    # Now, paginate this 'available_categories' list
+    category_page = user_data.get('category_page', 1)
+    categories_per_page = 4 # As per user's example
+    
+    total_categories = len(available_categories)
+    total_category_pages = math.ceil(total_categories / categories_per_page)
+    
+    start_index = (category_page - 1) * categories_per_page
+    end_index = start_index + categories_per_page
+    current_categories_chunk = available_categories[start_index:end_index]
+    
+    user_data['total_category_pages'] = total_category_pages # Store for the button
+
+    # --- 2. Build Message Caption ---
+    caption_text = f"📌 **{movie_title}**\n\n"
+    links_found_on_this_page = False
+    
+    for category_key, display_name in current_categories_chunk:
         links = download_links.get(category_key, [])
         if links:
             caption_text += f"**{display_name}**\n"
+            links_found_on_this_page = True
             shown_links = set()
-            for link in links[:5]: 
+            for link in links: # Show all links for these categories
                 display_link = shorten_url_display(link)
                 if display_link not in shown_links:
                     shown_links.add(display_link)
                     caption_text += f"• {display_link}\n"
             caption_text += "\n"
-            premium_links_found = True
 
-    # --- 2. Build COMBINED 'Other' Links (Paginated) ---
-    # This is the new logic: combine ALL other categories into one list
-    all_other_links = []
-    for category_key, links in download_links.items():
-        if category_key not in [key[0] for key in top_premium_order]:
-            all_other_links.extend(links)
-    
-    # Store this combined list in user_data for pagination
-    user_data['paginated_other_links'] = all_other_links
-    
-    if all_other_links:
-        caption_text += f"**🔗 Other Drive Links** (Page {other_links_page})\n"
-        
-        start_index = (other_links_page - 1) * other_links_per_page
-        end_index = start_index + other_links_per_page
-        current_other_links = all_other_links[start_index:end_index]
-        
-        if not current_other_links:
-            caption_text += "• No more links on this page.\n"
+    if not links_found_on_this_page:
+        if category_page == 1 and total_categories == 0:
+             caption_text += "❌ No direct download links (from Servers) were found.\n\n"
         else:
-            for link in current_other_links:
-                caption_text += f"• {shorten_url_display(link)}\n"
-        caption_text += "\n"
-
-    if not premium_links_found and not all_other_links:
-         caption_text += "❌ No direct download links (from Servers) were found.\n\n"
+             caption_text += "• No more links on this page.\n\n"
 
     caption_text += "Powered By @Sseries_Area"
     
@@ -185,22 +212,21 @@ def build_main_links_message(user_data):
             InlineKeyboardButton(f"{emoji} {text}", callback_data=f"btn_link_{i}")
         ])
 
-    # --- 4. Build 'Other' links pagination buttons ---
-    other_links_buttons = []
-    total_other_pages = (len(all_other_links) + other_links_per_page - 1) // other_links_per_page
-    if total_other_pages > 1:
-        if other_links_page < total_other_pages:
-            next_page = other_links_page + 1
-            other_links_buttons.append(
-                InlineKeyboardButton(f"🔄 Refresh Links (Next {next_page}/{total_other_pages})", callback_data=f"other_links_next_{next_page}")
+    # --- 4. Build Category pagination button ---
+    category_buttons = []
+    if total_category_pages > 1:
+        next_page = category_page + 1
+        if next_page > total_category_pages:
+            next_page = 1 # Loop back to 1
+        
+        category_buttons.append(
+            InlineKeyboardButton(
+                f"🔄 Refresh Links {category_page}/{total_category_pages}", 
+                callback_data=f"category_page_{next_page}"
             )
-        elif other_links_page > 1:
-            prev_page = other_links_page - 1
-            other_links_buttons.append(
-                InlineKeyboardButton(f"⬅️ Previous Links ({prev_page}/{total_other_pages})", callback_data=f"other_links_prev_{prev_page}")
-            )
-    if other_links_buttons:
-        buttons.append(other_links_buttons)
+        )
+    if category_buttons:
+        buttons.append(category_buttons)
 
     # --- 5. Navigation buttons ---
     buttons.extend([
@@ -362,7 +388,7 @@ async def show_download_links(bot, update):
         user_data['poster'] = movie_details.get('poster')
         user_data['main_links'] = movie_details.get('main_links', {})
         user_data['button_links'] = movie_details.get('button_links', {})
-        user_data['other_links_page'] = 1 
+        user_data['category_page'] = 1 # Reset to page 1
         
         caption, buttons = build_main_links_message(user_data)
         
@@ -474,9 +500,9 @@ async def handle_dynamic_button_click(bot, update):
         except:
             pass
 
-@Client.on_callback_query(filters.regex(r"^other_links_"))
-async def paginate_other_links(bot, update):
-    """Handle 'Refresh'/'Previous' for other links"""
+@Client.on_callback_query(filters.regex(r"^category_page_"))
+async def paginate_category_links(bot, update):
+    """Handle 'Refresh Links' for categories"""
     try:
         user_id = update.from_user.id
         user_data = user_searches.get(user_id)
@@ -485,11 +511,10 @@ async def paginate_other_links(bot, update):
             await update.answer("❌ Search expired.", show_alert=True)
             return
 
-        action, new_page = update.data.split('_', 2)[-1].rsplit('_', 1)
-        new_page = int(new_page)
+        new_page = int(update.data.split('_')[-1])
         
         # Update the page in user_data
-        user_data['other_links_page'] = new_page
+        user_data['category_page'] = new_page
         
         # Re-build the entire message
         caption, buttons = build_main_links_message(user_data)
@@ -498,12 +523,14 @@ async def paginate_other_links(bot, update):
             caption=caption,
             reply_markup=buttons
         )
-        await update.answer(f"Page {new_page} loaded")
+        
+        total_pages = user_data.get('total_category_pages', 1)
+        await update.answer(f"Page {new_page}/{total_pages} loaded")
 
     except MessageNotModified:
         await update.answer("ℹ️ No changes.")
     except Exception as e:
-        print(f"❌ Other links pagination error: {e}")
+        print(f"❌ Category pagination error: {e}")
         await update.answer("❌ Error loading links.", show_alert=True)
 
 @Client.on_callback_query(filters.regex(r"^back_to_main$"))
@@ -517,7 +544,7 @@ async def back_to_main_links(bot, update):
             await update.answer("❌ No previous data found", show_alert=True)
             return
         
-        user_data['other_links_page'] = 1
+        user_data['category_page'] = 1 # Reset to page 1
         
         caption, buttons = build_main_links_message(user_data)
         
